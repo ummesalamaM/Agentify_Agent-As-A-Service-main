@@ -1,0 +1,29 @@
+# =====================
+# Backend (Python)
+# =====================
+backend/__pycache__/
+backend/*.pyc
+backend/venv/
+backend/.env
+
+# Credentials & Secrets
+backend/gmail_credentials.json
+backend/service_account.json
+backend/token.json
+backend/*.json
+
+# =====================
+# Frontend (React)
+# =====================
+frontend/node_modules/
+frontend/.env
+
+# =====================
+# OS / Editor
+# =====================
+.DS_Store
+
+# Custom Run & Temp files
+back.txt
+front.tst
+mermaid.mmd

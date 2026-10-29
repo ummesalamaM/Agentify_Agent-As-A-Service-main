@@ -1,0 +1,797 @@
+import { useState, useEffect, useRef } from 'react';
+import { useOutletContext, Link } from 'react-router-dom';
+import axios from 'axios';
+import '../assets/css/edit-mode-addon.css';
+
+function WebsiteBuilder({ initialData }) {
+  const context = useOutletContext();
+  const { isLoggedIn, setIsLoginModalOpen } = context || {};
+  const [websiteTitle, setWebsiteTitle] = useState('');
+  const [websiteDescription, setWebsiteDescription] = useState('');
+  const [theme, setTheme] = useState('Sci-Fi Dark');
+  const [preview, setPreview] = useState('');
+  const [generatedCode, setGeneratedCode] = useState({ 'index.html': '', 'style.css': '', 'script.js': '' });
+  const [activeTab, setActiveTab] = useState('index.html');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isModifying, setIsModifying] = useState(false);
+  const [editPrompt, setEditPrompt] = useState('');
+  const [editHistory, setEditHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showCodePanel, setShowCodePanel] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const abortControllerRef = useRef(null);
+  const downloadMenuRef = useRef(null);
+
+  // Two separate iframe refs
+  const previewIframeRef = useRef(null);
+  const fullscreenIframeRef = useRef(null);
+
+  useEffect(() => {
+    if (!isLoggedIn && setIsLoginModalOpen) {
+      setIsLoginModalOpen(true);
+    }
+  }, [isLoggedIn, setIsLoginModalOpen]);
+
+  // Handle iframe load to intercept navigation
+  const handleIframeLoad = (iframeRef) => {
+    if (iframeRef.current && iframeRef.current.contentDocument) {
+      try {
+        const iframeDoc = iframeRef.current.contentDocument;
+        const iframeWindow = iframeRef.current.contentWindow;
+
+        // Intercept all link clicks
+        iframeDoc.addEventListener('click', (e) => {
+          const target = e.target.closest('a, button');
+          if (target && target.tagName === 'A') {
+            const href = target.getAttribute('href');
+            if (href && !href.startsWith('#')) {
+              e.preventDefault();
+              e.stopPropagation();
+              showPopup('Links are disabled in preview. Download the code to deploy your website.', 'info');
+            }
+          }
+        }, true);
+
+        // Intercept form submissions
+        const forms = iframeDoc.querySelectorAll('form');
+        forms.forEach((form) => {
+          form.addEventListener('submit', (e) => {
+            const action = form.getAttribute('action');
+            if (action && !action.startsWith('#') && !action.includes('javascript:')) {
+              e.preventDefault();
+              e.stopPropagation();
+              showPopup('Form submissions are disabled in preview.', 'info');
+            }
+          }, true);
+        });
+
+        // Override navigation methods
+        const handler = {
+          set(target, prop, value) {
+            if (prop === 'href' || prop === 'pathname') {
+              console.log('Navigation attempt blocked:', value);
+              return true;
+            }
+            target[prop] = value;
+            return true;
+          }
+        };
+        iframeWindow.location = new Proxy(iframeWindow.location, handler);
+
+      } catch (error) {
+        console.log('Iframe sandbox prevents full manipulation (expected for security)');
+      }
+    }
+  };
+
+  // Generate Blob URL for preview iframe
+  useEffect(() => {
+    if (preview && !isFullscreen && previewIframeRef.current) {
+      const blob = new Blob([preview], { type: 'text/html' });
+      const blobUrl = URL.createObjectURL(blob);
+      previewIframeRef.current.src = blobUrl;
+
+      // Cleanup on unmount or update
+      return () => {
+        URL.revokeObjectURL(blobUrl);
+      };
+    }
+  }, [preview, isFullscreen]);
+
+  // Generate Blob URL for fullscreen iframe
+  useEffect(() => {
+    if (preview && isFullscreen && fullscreenIframeRef.current) {
+      const blob = new Blob([preview], { type: 'text/html' });
+      const blobUrl = URL.createObjectURL(blob);
+      fullscreenIframeRef.current.src = blobUrl;
+
+      return () => {
+        URL.revokeObjectURL(blobUrl);
+      };
+    }
+  }, [preview, isFullscreen]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setIsGenerating(true);
+    abortControllerRef.current = new AbortController();
+
+    const prompt = `Create a ${theme} theme website titled "${websiteTitle}" with the following description: ${websiteDescription}`;
+
+    try {
+      const response = await axios.post('http://localhost:5000/generate',
+        { prompt, theme },
+        {
+          signal: abortControllerRef.current.signal,
+          timeout: 120000 // 120s timeout to match backend
+        }
+      );
+      const files = response.data.files;
+
+      setGeneratedCode(files);
+
+      const fullHtml = constructFullHtml(files);
+      setPreview(fullHtml);
+      setShowCodePanel(true);
+      showPopup('Website created successfully!', 'success');
+    } catch (error) {
+      if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
+        showPopup('Website generation has been terminated.', 'warning');
+      } else {
+        console.error(error);
+        showNotification('Error generating website. Make sure backend is running.', 'error');
+      }
+    } finally {
+      setIsGenerating(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleModify = async (e) => {
+    if (e) e.preventDefault();
+    if (!editPrompt.trim()) return;
+
+    setIsModifying(true);
+    try {
+      const response = await axios.post('http://localhost:5000/modify', {
+        current_files: generatedCode,
+        edit_prompt: editPrompt,
+        theme: theme
+      });
+
+      const files = response.data.files;
+      setGeneratedCode(files);
+
+      const fullHtml = constructFullHtml(files);
+      setPreview(fullHtml);
+      
+      setEditHistory(prev => [editPrompt, ...prev]);
+      setEditPrompt('');
+      showPopup('Website updated successfully!', 'success');
+    } catch (error) {
+      console.error(error);
+      showNotification('Error updating website. Check backend connection.', 'error');
+    } finally {
+      setIsModifying(false);
+    }
+  };
+
+  const constructFullHtml = (files) => {
+    const processedHtml = processGeneratedHtml(files['index.html'] || '<h1>No HTML generated</h1>');
+
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    ${files['style.css'] || ''}
+    a[href^="http"], a[href^="https"], a[href^="/"] {
+      pointer-events: none;
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    a[href^="#"] {
+      pointer-events: auto;
+      opacity: 1;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  ${processedHtml}
+  <script>
+    (function() {
+      'use strict';
+      document.addEventListener('click', function(e) {
+        if (e.target.tagName === 'A') {
+          const href = e.target.getAttribute('href');
+          if (href && !href.startsWith('#')) {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+          }
+        }
+      }, true);
+
+      document.addEventListener('submit', function(e) {
+        const form = e.target;
+        const action = form.getAttribute('action');
+        if (action && action.trim() !== '' && !action.startsWith('#')) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+      }, true);
+
+      window.open = function() { return null; };
+      const originalAssign = window.location.assign;
+      const originalReplace = window.location.replace;
+      window.location.assign = function() {};
+      window.location.replace = function() {};
+      Object.defineProperty(Location.prototype, 'href', {
+        set: function() {},
+        get: function() { return window.location.href; }
+      });
+    })();
+  </script>
+  <script>${files['script.js'] || ''}</script>
+</body>
+</html>`;
+  };
+
+  const handleTerminate = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
+  const processGeneratedHtml = (html) => {
+    let processed = html;
+    processed = processed.replace(/href="\/(?!\/)/g, 'href="#');
+    processed = processed.replace(/href="(?!#|http|javascript)/g, 'href="#');
+    return processed;
+  };
+
+  useEffect(() => {
+    if (initialData && initialData.files) {
+      setGeneratedCode(initialData.files);
+      const fullHtml = constructFullHtml(initialData.files);
+      setPreview(fullHtml);
+      setShowCodePanel(true);
+    } else if (initialData && initialData.generatedCode) {
+      // Fallback for Agentify.jsx storage
+      setGeneratedCode(initialData.generatedCode);
+      const fullHtml = constructFullHtml(initialData.generatedCode);
+      setPreview(fullHtml);
+      setShowCodePanel(true);
+    }
+  }, [initialData]);
+
+  const showPopup = (message, type = 'info') => {
+    const popup = document.createElement('div');
+    popup.className = `center-popup ${type}`;
+    popup.innerHTML = `
+      <div class="popup-content">
+        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warning' ? 'exclamation-circle' : 'info-circle'}"></i>
+        <p>${message}</p>
+      </div>
+    `;
+    document.body.appendChild(popup);
+
+    setTimeout(() => popup.classList.add('show'), 10);
+    setTimeout(() => {
+      popup.classList.remove('show');
+      setTimeout(() => popup.remove(), 300);
+    }, 3000);
+  };
+
+  const downloadCode = (filename) => {
+    const fileMap = {
+      'index.html': { content: generatedCode['index.html'], type: 'text/html' },
+      'style.css':  { content: generatedCode['style.css'],  type: 'text/css' },
+      'script.js':  { content: generatedCode['script.js'],  type: 'text/javascript' },
+    };
+    const target = fileMap[filename];
+    if (!target || !target.content) return;
+    const element = document.createElement('a');
+    const file = new Blob([target.content], { type: target.type });
+    element.href = URL.createObjectURL(file);
+    element.download = filename;
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+    setShowDownloadMenu(false);
+    showNotification(`${filename} downloaded!`, 'success');
+  };
+
+  const downloadAllCode = () => {
+    downloadCode('index.html');
+    setTimeout(() => downloadCode('style.css'), 300);
+    setTimeout(() => downloadCode('script.js'), 600);
+    setShowDownloadMenu(false);
+  };
+
+  const toggleFullscreen = () => {
+    setIsFullscreen((prev) => !prev);
+  };
+
+  const showNotification = (message, type = 'info') => {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+
+    setTimeout(() => {
+      notification.classList.add('fade-out');
+      notification.addEventListener('transitionend', () => notification.remove());
+    }, 3000);
+  };
+
+  const themes = [
+    { value: 'Sci-Fi Dark', icon: 'fa-rocket', color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
+    { value: 'Minimalist', icon: 'fa-layer-group', color: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
+    { value: 'Corporate', icon: 'fa-building', color: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' }
+  ];
+
+  return (
+    <>
+
+      <section className={`modern-hero web-hero ${!isLoggedIn ? 'blur' : ''}`}>
+        <div className="hero-grid">
+          <div className="hero-left">
+            <div className="hero-tag">
+              <i className="fas fa-globe"></i>
+              <span>Website Builder</span>
+            </div>
+            <h1 className="hero-heading">
+              Build Stunning
+              <span className="gradient-text"> Websites Instantly</span>
+            </h1>
+            <p className="hero-description">
+              AI-powered web creation. Just describe your vision and watch it transform into a fully responsive website in seconds.
+            </p>
+            <div className="hero-stats">
+              <div className="stat-item">
+                <div className="stat-number">60s</div>
+                <div className="stat-label">Build Time</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-number">100%</div>
+                <div className="stat-label">Responsive</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-number">0</div>
+                <div className="stat-label">Coding</div>
+              </div>
+            </div>
+          </div>
+          <div className="hero-right">
+            <div className="hero-visual">
+              <div className="visual-icon">
+                <i className="fas fa-code"></i>
+              </div>
+              <div className="visual-rings">
+                <div className="ring ring-1"></div>
+                <div className="ring ring-2"></div>
+                <div className="ring ring-3"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={`agent-page website-builder-page ${!isLoggedIn ? 'blur' : ''}`} id="configure">
+        <div className="builder-container">
+          <div className="section-header-builder">
+            <span className="section-badge-builder">
+              <i className="fas fa-wand-magic-sparkles"></i> AI Generator
+            </span>
+            <h2 className="section-title-builder">Build Your Dream Website</h2>
+            <p className="section-subtitle-builder">
+              Describe your vision and watch AI create a beautiful website in seconds
+            </p>
+          </div>
+
+          <div className="builder-grid">
+            {/* Left Panel - Configuration */}
+            <div className="config-panel">
+              <div className="panel-header-enhanced">
+                <div className="header-icon-wrapper">
+                  <i className="fas fa-sliders-h"></i>
+                </div>
+                <div className="header-text">
+                  <h3>Configuration</h3>
+                  <p>Customize your website details</p>
+                </div>
+              </div>
+
+              <form className="builder-form" onSubmit={handleSubmit}>
+                <div className="form-group-enhanced">
+                  <label className="label-enhanced">
+                    <i className="fas fa-heading"></i>
+                    <span>Website Title</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g., My Awesome Portfolio"
+                    className="input-enhanced"
+                    value={websiteTitle}
+                    onChange={(e) => setWebsiteTitle(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="form-group-enhanced">
+                  <label className="label-enhanced">
+                    <i className="fas fa-align-left"></i>
+                    <span>Description</span>
+                  </label>
+                  <textarea
+                    placeholder="Describe your website purpose, content, and features..."
+                    className="textarea-enhanced"
+                    value={websiteDescription}
+                    onChange={(e) => setWebsiteDescription(e.target.value)}
+                    required
+                  ></textarea>
+                </div>
+
+                <div className="form-group-enhanced">
+                  <label className="label-enhanced">
+                    <i className="fas fa-palette"></i>
+                    <span>Choose Theme</span>
+                  </label>
+                  <div className="theme-selector">
+                    {themes.map((themeOption) => (
+                      <div
+                        key={themeOption.value}
+                        className={`theme-card ${theme === themeOption.value ? 'active' : ''}`}
+                        onClick={() => setTheme(themeOption.value)}
+                      >
+                        <div className="theme-icon" style={{ background: themeOption.color }}>
+                          <i className={`fas ${themeOption.icon}`}></i>
+                        </div>
+                        <span className="theme-name">{themeOption.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="form-actions">
+                  <button type="submit" className="generate-btn-enhanced" disabled={isGenerating}>
+                    {isGenerating ? (
+                      <>
+                        <i className="fas fa-spinner fa-spin"></i>
+                        <span>Generating Magic...</span>
+                      </>
+                    ) : (
+                      <>
+                        <i className="fas fa-magic"></i>
+                        <span>Generate Website</span>
+                      </>
+                    )}
+                  </button>
+
+                  {isGenerating && (
+                    <button
+                      type="button"
+                      className="terminate-btn"
+                      onClick={handleTerminate}
+                    >
+                      <i className="fas fa-times-circle"></i>
+                      <span>Terminate Generation</span>
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            {/* Right Panel - Preview */}
+            <div className="preview-panel-enhanced">
+              <div className="panel-header-enhanced">
+                <div className="header-icon-wrapper">
+                  <i className="fas fa-eye"></i>
+                </div>
+                <div className="header-text">
+                  <h3>Live Preview</h3>
+                  <p>See your website come to life</p>
+                </div>
+                {preview && (
+                  <button className="fullscreen-btn" onClick={toggleFullscreen} title="Toggle Fullscreen">
+                    <i className={`fas fa-${isFullscreen ? 'compress' : 'expand'}`}></i>
+                  </button>
+                )}
+              </div>
+
+              <div className="preview-container">
+                {preview ? (
+                  <iframe
+                    ref={previewIframeRef}
+                    className="preview-iframe"
+                    title="Website Preview"
+                    sandbox="allow-scripts allow-same-origin allow-forms"
+                    onLoad={() => handleIframeLoad(previewIframeRef)}
+                  />
+                ) : (
+                  <div className="preview-placeholder-enhanced">
+                    <div className="placeholder-icon">
+                      <i className="fas fa-desktop"></i>
+                    </div>
+                    <h3>Preview Area</h3>
+                    <p>Your generated website will appear here</p>
+                    <div className="placeholder-features">
+                      <span><i className="fas fa-check"></i> Responsive Design</span>
+                      <span><i className="fas fa-check"></i> Modern UI</span>
+                      <span><i className="fas fa-check"></i> Fast Loading</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {preview && (
+                <div className="edit-website-section animate-fade-in" style={{ marginTop: '24px' }}>
+                  <div className="edit-box-enhanced">
+
+                    {/* Header */}
+                    <div className="edit-header">
+                      <div className="edit-title">
+                        <div className="edit-title-icon">
+                          <i className="fas fa-wand-magic-sparkles"></i>
+                        </div>
+                        <div>
+                          <span className="edit-title-text">AI Edit Mode</span>
+                          <span className="edit-title-subtitle">Describe changes to apply to the preview</span>
+                        </div>
+                      </div>
+                      {editHistory.length > 0 && (
+                        <button
+                          className="history-toggle-btn"
+                          onClick={() => setShowHistory(!showHistory)}
+                        >
+                          <i className={`fas fa-${showHistory ? 'chevron-up' : 'clock-rotate-left'}`}></i>
+                          <span>{showHistory ? 'Hide' : `History (${editHistory.length})`}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Quick Suggestion Chips */}
+                    <div className="edit-chips">
+                      {['Change color scheme', 'Add animations', 'Add contact form', 'Make it dark mode'].map(chip => (
+                        <button
+                          key={chip}
+                          className="edit-chip"
+                          onClick={() => setEditPrompt(prev => prev ? `${prev}, ${chip.toLowerCase()}` : chip)}
+                          disabled={isModifying}
+                        >
+                          {chip}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Textarea + Button */}
+                    <div className="edit-input-wrapper">
+                      <textarea
+                        className="edit-textarea"
+                        placeholder="e.g., 'Change the header gradient to purple', 'Add a pricing section with 3 tiers', 'Make the font bigger'..."
+                        value={editPrompt}
+                        onChange={(e) => setEditPrompt(e.target.value)}
+                        disabled={isModifying}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isModifying && editPrompt.trim()) {
+                            handleModify();
+                          }
+                        }}
+                      ></textarea>
+                      <div className="edit-actions-row">
+                        <span className="edit-hint"><i className="fas fa-keyboard"></i> Ctrl+Enter to apply</span>
+                        <button
+                          className="apply-changes-btn"
+                          onClick={handleModify}
+                          disabled={isModifying || !editPrompt.trim()}
+                        >
+                          {isModifying ? (
+                            <>
+                              <i className="fas fa-spinner fa-spin"></i>
+                              <span>Applying Changes...</span>
+                            </>
+                          ) : (
+                            <>
+                              <i className="fas fa-bolt"></i>
+                              <span>Apply Changes</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Edit History Panel */}
+                    {showHistory && editHistory.length > 0 && (
+                      <div className="edit-history-panel">
+                        <div className="history-label"><i className="fas fa-clock-rotate-left"></i> Recent Edits</div>
+                        <div className="history-list">
+                          {editHistory.map((item, idx) => (
+                            <div
+                              key={idx}
+                              className="history-item"
+                              onClick={() => setEditPrompt(item)}
+                              title="Click to reuse this prompt"
+                            >
+                              <i className="fas fa-rotate-left"></i>
+                              <span>{item}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Code Panel */}
+          {showCodePanel && (
+            <div className="code-panel-enhanced">
+              <div className="code-header">
+                <div className="code-header-left">
+                  <i className="fas fa-code"></i>
+                  <span>Generated Code</span>
+                </div>
+                {/* Download Dropdown */}
+                <div className="download-dropdown-wrapper" ref={downloadMenuRef}>
+                  <button
+                    className="download-btn-enhanced"
+                    onClick={() => setShowDownloadMenu(prev => !prev)}
+                  >
+                    <i className="fas fa-download"></i>
+                    <span>Download</span>
+                    <i className={`fas fa-chevron-${showDownloadMenu ? 'up' : 'down'} download-caret`}></i>
+                  </button>
+                  {showDownloadMenu && (
+                    <div className="download-dropdown-menu">
+                      <button className="download-dropdown-item" onClick={() => downloadCode('index.html')}>
+                        <i className="fab fa-html5" style={{ color: '#e44d26' }}></i>
+                        <span>HTML File</span>
+                        <span className="file-ext">.html</span>
+                      </button>
+                      <button className="download-dropdown-item" onClick={() => downloadCode('style.css')}>
+                        <i className="fab fa-css3-alt" style={{ color: '#2965f1' }}></i>
+                        <span>CSS File</span>
+                        <span className="file-ext">.css</span>
+                      </button>
+                      <button className="download-dropdown-item" onClick={() => downloadCode('script.js')}>
+                        <i className="fab fa-js-square" style={{ color: '#f0db4f' }}></i>
+                        <span>JavaScript File</span>
+                        <span className="file-ext">.js</span>
+                      </button>
+                      <div className="download-dropdown-divider"></div>
+                      <button className="download-dropdown-item download-all" onClick={downloadAllCode}>
+                        <i className="fas fa-file-zipper"></i>
+                        <span>Download All</span>
+                        <span className="file-ext">3 files</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="code-tabs-enhanced">
+                {Object.keys(generatedCode).map((tab) => (
+                  <button
+                    key={tab}
+                    className={`code-tab ${activeTab === tab ? 'active' : ''}`}
+                    onClick={() => setActiveTab(tab)}
+                  >
+                    <i className={`fab fa-${tab === 'index.html' ? 'html5' : tab === 'style.css' ? 'css3-alt' : 'js-square'}`}></i>
+                    <span>{tab === 'index.html' ? 'HTML' : tab === 'style.css' ? 'CSS' : 'JavaScript'}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="code-viewer">
+                <pre><code>{generatedCode[activeTab] || '// No code generated yet'}</code></pre>
+              </div>
+            </div>
+          )}
+
+          {/* Features Section */}
+          <div className="builder-features">
+            <h3 className="features-title">
+              <i className="fas fa-star"></i> Key Features
+            </h3>
+            <div className="features-grid-builder">
+              <div className="feature-item-builder">
+                <div className="feature-icon-builder" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+                  <i className="fas fa-mobile-alt"></i>
+                </div>
+                <h4>Fully Responsive</h4>
+                <p>Works perfectly on all devices</p>
+              </div>
+              <div className="feature-item-builder">
+                <div className="feature-icon-builder" style={{ background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' }}>
+                  <i className="fas fa-robot"></i>
+                </div>
+                <h4>AI-Powered</h4>
+                <p>Smart content generation</p>
+              </div>
+              <div className="feature-item-builder">
+                <div className="feature-icon-builder" style={{ background: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' }}>
+                  <i className="fas fa-rocket"></i>
+                </div>
+                <h4>Quick Deploy</h4>
+                <p>Launch in seconds</p>
+              </div>
+              <div className="feature-item-builder">
+                <div className="feature-icon-builder" style={{ background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)' }}>
+                  <i className="fas fa-search"></i>
+                </div>
+                <h4>SEO Optimized</h4>
+                <p>Built-in SEO best practices</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Fullscreen Preview Overlay using inline styles to guarantee rendering */}
+      {isFullscreen && preview && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          zIndex: 99999,
+          backgroundColor: '#0f172a',
+          display: 'flex',
+          flexDirection: 'column'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '1rem',
+            backgroundColor: '#0f172a',
+            borderBottom: '1px solid rgba(255,255,255,0.1)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <i className="fas fa-desktop" style={{ color: '#c084fc' }}></i>
+              <span style={{ color: 'white', fontWeight: 600 }}>Fullscreen Preview</span>
+            </div>
+            <button
+              onClick={toggleFullscreen}
+              style={{
+                width: '40px', height: '40px',
+                borderRadius: '0.75rem',
+                backgroundColor: 'rgba(255,255,255,0.05)',
+                color: 'white',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                border: '1px solid rgba(255,255,255,0.1)',
+                cursor: 'pointer'
+              }}
+            >
+              <i className="fas fa-times"></i>
+            </button>
+          </div>
+          <div style={{ flex: 1, width: '100%', backgroundColor: 'white', position: 'relative' }}>
+            <iframe
+              ref={fullscreenIframeRef}
+              style={{ width: '100%', height: '100%', border: 'none' }}
+              title="Fullscreen Website Preview"
+              sandbox="allow-scripts allow-same-origin allow-forms"
+              onLoad={() => handleIframeLoad(fullscreenIframeRef)}
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="back-nav" style={{ marginTop: '40px' }}>
+        <Link to="/" className="back-link">
+          <i className="fas fa-arrow-left"></i> Back to Home
+        </Link>
+      </div>
+    </>
+  );
+}
+
+export default WebsiteBuilder;
