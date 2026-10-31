@@ -1,5 +1,8 @@
 import { useState } from 'react';
 
+const LOGIN_USERNAME = 'umme';
+const LOGIN_PASSWORD = '123';
+
 function LoginModal({ isOpen, onClose, onLoginSuccess }) {
   const [isSignUp, setIsSignUp] = useState(false);
   const [username, setUsername] = useState('');
@@ -8,7 +11,7 @@ function LoginModal({ isOpen, onClose, onLoginSuccess }) {
 
   const handleLogin = (e) => {
     e.preventDefault();
-    if (username === 'rohit' && password === '123') {
+    if (username === LOGIN_USERNAME && password === LOGIN_PASSWORD) {
       localStorage.setItem('isLoggedIn', 'true');
       showNotification('Login successful! Welcome to Agentify.', 'success');
       onLoginSuccess();
@@ -16,7 +19,7 @@ function LoginModal({ isOpen, onClose, onLoginSuccess }) {
       // Reload to update UI
       window.location.reload();
     } else {
-      showNotification('Invalid credentials. Use rohit / 123', 'error');
+      showNotification(`Invalid credentials. Use ${LOGIN_USERNAME} / ${LOGIN_PASSWORD}`, 'error');
     }
   };
 
@@ -30,7 +33,7 @@ function LoginModal({ isOpen, onClose, onLoginSuccess }) {
     notification.className = `notification ${type}`;
     notification.textContent = message;
     document.body.appendChild(notification);
-    
+
     setTimeout(() => {
       notification.classList.add('fade-out');
       notification.addEventListener('transitionend', () => {
@@ -51,15 +54,15 @@ function LoginModal({ isOpen, onClose, onLoginSuccess }) {
             <i className="fas fa-times"></i>
           </button>
         </div>
-        
+
         <div className="auth-tabs">
-          <button 
+          <button
             className={`tab-btn ${!isSignUp ? 'active' : ''}`}
             onClick={() => setIsSignUp(false)}
           >
             Sign In
           </button>
-          <button 
+          <button
             className={`tab-btn ${isSignUp ? 'active' : ''}`}
             onClick={() => setIsSignUp(true)}
           >
@@ -71,66 +74,66 @@ function LoginModal({ isOpen, onClose, onLoginSuccess }) {
           <form className="login-form" onSubmit={handleLogin}>
             <div className="input-group">
               <label className="input-label">Username</label>
-              <input 
-                type="text" 
-                className="input-field" 
+              <input
+                type="text"
+                className="input-field"
                 placeholder="Enter username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                required 
+                required
               />
             </div>
             <div className="input-group">
               <label className="input-label">Password</label>
-              <input 
-                type="password" 
-                className="input-field" 
+              <input
+                type="password"
+                className="input-field"
                 placeholder="Enter password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                required 
+                required
               />
             </div>
             <button type="submit" className="login-btn">
               <i className="fas fa-sign-in-alt"></i> Sign In
             </button>
             <div className="login-help">
-              <p>Demo credentials: <strong>rohit / 123</strong></p>
+              <p>Demo credentials: <strong>{LOGIN_USERNAME} / {LOGIN_PASSWORD}</strong></p>
             </div>
           </form>
         ) : (
           <form className="login-form" onSubmit={handleSignUp}>
             <div className="input-group">
               <label className="input-label">Username</label>
-              <input 
-                type="text" 
-                className="input-field" 
+              <input
+                type="text"
+                className="input-field"
                 placeholder="Choose a username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                required 
+                required
               />
             </div>
             <div className="input-group">
               <label className="input-label">Email</label>
-              <input 
-                type="email" 
-                className="input-field" 
+              <input
+                type="email"
+                className="input-field"
                 placeholder="Enter your email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                required 
+                required
               />
             </div>
             <div className="input-group">
               <label className="input-label">Password</label>
-              <input 
-                type="password" 
-                className="input-field" 
+              <input
+                type="password"
+                className="input-field"
                 placeholder="Create a password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                required 
+                required
               />
             </div>
             <button type="submit" className="login-btn">
