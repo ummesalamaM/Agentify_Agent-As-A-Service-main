@@ -106,13 +106,12 @@ def call_gemini(prompt: str) -> str:
 
     # Try working models in order of preference based on current API availability
     models_to_try = [
-        "gemini-2.0-flash-lite",      # Fast, highest rate limits
-        "gemini-2.0-flash",           # High quality, good limits
-        "gemini-2.5-flash-lite",      # New but good limits
-        "gemini-flash-latest",        # Dynamic fallback
-        "gemini-2.5-flash"            # Lowest daily limit, try last
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-3-flash-preview",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash"
     ]
-
     last_error = None
     for model_name in models_to_try:
         try:
